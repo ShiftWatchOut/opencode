@@ -1,0 +1,57 @@
+name: deploy-docs-preview
+
+on:
+  schedule:
+    - cron: "0 2,14 * * *"
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout deploy-preview branch
+        uses: actions/checkout@v4
+        with:
+          ref: deploy-preview
+          fetch-depth: 0
+
+      - name: Sync with upstream dev
+        run: |
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream dev
+          git merge upstream/dev --no-edit || {
+            echo "::warning::Merge conflict — upstream changed astro.config.mjs, attempting auto-resolve"
+            git checkout --theirs packages/web/astro.config.mjs
+            git apply $GITHUB_WORKSPACE/.github/patches/fix-pagefind-routes.patch 2>/dev/null || true
+            git add -A
+            git commit --no-edit
+          }
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build docs
+        run: cd packages/web && bun run build
+
+      - name: Remove Worker bundle
+        run: rm -rf packages/web/dist/_worker.js
+
+      - name: Verify pagefind
+        run: |
+          test -f packages/web/dist/docs/pagefind/pagefind.js || { echo "pagefind.js not found"; exit 1; }
+          grep -q "pagefind" packages/web/dist/_routes.json || { echo "pagefind missing from _routes.json"; exit 1; }
+          echo "Pagefind verified"
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy packages/web/dist --project-name=opencode-docs-test
